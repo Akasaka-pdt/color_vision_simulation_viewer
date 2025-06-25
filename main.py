@@ -64,8 +64,8 @@ def simulate_deficiency(rgb, deficiency_type):
     rgb_sim = XYZ_to_sRGB(xyz_sim)
     return linear_to_gamma(rgb_sim)
 
-def convert_image(img, mode):
-    img = img.resize((img.width , img.height), Image.LANCZOS)
+def convert_image(img, mode, multiple):
+    img = img.resize(((img.width * multiple) , (img.height * multiple)), Image.LANCZOS)
 
     arr = np.array(img.convert("RGB"))
     h, w, _ = arr.shape
@@ -97,6 +97,9 @@ def main():
             """)
 
     uploaded_files = st.sidebar.file_uploader("Upload a PDF file", accept_multiple_files=True, type="pdf")
+    multiple = st.sidebar.slider("画質を調節してください。", 0.0, 1.0, 0.1)
+    st.sidebar.write(f"画質：{multiple}倍で処理")
+    
     if st.sidebar.button("Process PDF Files", disabled=not uploaded_files):
         if uploaded_files:
             progress_text = "Operation in progress. Please wait..."
@@ -141,7 +144,7 @@ def main():
 
                     with tab2:
                         st.subheader(f"{filename} - Page {page_num + 1} (Protanopia)")
-                        converted = convert_image(img, 'protanopia')
+                        converted = convert_image(img, 'protanopia', multiple)
                         st.image(converted, caption="Protanopia", use_container_width=True)
                     img_bytes = io.BytesIO()
                     converted.save(img_bytes, format="PNG")
@@ -151,7 +154,7 @@ def main():
 
                     with tab3:
                         st.subheader(f"{filename} - Page {page_num + 1} (Deuteranopia)")
-                        converted = convert_image(img, 'deuteranopia')
+                        converted = convert_image(img, 'deuteranopia', multiple)
                         st.image(converted, caption="Deuteranopia", use_container_width=True)
                     img_bytes = io.BytesIO()
                     converted.save(img_bytes, format="PNG")
@@ -161,7 +164,7 @@ def main():
 
                     with tab4:
                         st.subheader(f"{filename} - Page {page_num + 1} (Tritanopia)")
-                        converted = convert_image(img, 'tritanopia')    
+                        converted = convert_image(img, 'tritanopia', multiple)    
                         st.image(converted, caption="Tritanopia", use_container_width=True)
                     img_bytes = io.BytesIO()
                     converted.save(img_bytes, format="PNG")
@@ -171,7 +174,7 @@ def main():
 
                     with tab5:
                         st.subheader(f"{filename} - Page {page_num + 1} (Achromatopsia)")
-                        converted = convert_image(img, 'Acromat')
+                        converted = convert_image(img, 'Acromat', multiple)
                         st.image(converted, caption="Achromatopsia", use_container_width=True)
                     img_bytes = io.BytesIO()
                     converted.save(img_bytes, format="PNG")
