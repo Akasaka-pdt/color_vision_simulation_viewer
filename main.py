@@ -65,7 +65,7 @@ def simulate_deficiency(rgb, deficiency_type):
     return linear_to_gamma(rgb_sim)
 
 def convert_image(img, mode, multiple):
-    img = img.resize(((img.width * multiple) , (img.height * multiple)), Image.LANCZOS)
+    img = img.resize((int(img.width * multiple) , int(img.height * multiple)), Image.LANCZOS)
 
     arr = np.array(img.convert("RGB"))
     h, w, _ = arr.shape
