@@ -97,7 +97,7 @@ def main():
             """)
 
     uploaded_files = st.sidebar.file_uploader("Upload a PDF file", accept_multiple_files=True, type="pdf")
-    multiple = st.sidebar.slider("画質を調節してください。", 0.0, 1.0, 0.1)
+    multiple = st.sidebar.slider("画質を調節してください。", 0.0, 1.0, 1.0)
     st.sidebar.write(f"画質：{multiple}倍で処理")
     
     if st.sidebar.button("Process PDF Files", disabled=not uploaded_files):
