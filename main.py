@@ -19,25 +19,25 @@ def sRGB_to_XYZ(rgb):
     M = np.array([[0.4124, 0.3576, 0.1805],
                   [0.2126, 0.7152, 0.0722],
                   [0.0193, 0.1192, 0.9505]])
-    return np.dot(M, rgb)
+    return np.dot(rgb, M.T)
 
 def XYZ_to_LMS(xyz):
     M = np.array([[0.4002, 0.7075, -0.0808],
                   [-0.2263, 1.1653, 0.0457],
                   [0.0, 0.0, 0.9182]])
-    return np.dot(M, xyz)
+    return np.dot(xyz, M.T)
 
 def LMS_to_XYZ(lms):
     M = np.array([[1.8599, -1.1294, 0.2199],
                   [0.3612, 0.6388, 0.0],
                   [0.0, 0.0, 1.0891]])
-    return np.dot(M, lms)
+    return np.dot(lms, M.T)
 
 def XYZ_to_sRGB(xyz):
     M = np.array([[3.2406, -1.5372, -0.4986],
                   [-0.9689, 1.8758, 0.0415],
                   [0.0557, -0.2040, 1.0570]])
-    return np.dot(M, xyz)
+    return np.dot(xyz, M.T)
 
 def simulate_deficiency(rgb, deficiency_type):
     linear_rgb = gamma_to_linear(rgb)
@@ -59,7 +59,7 @@ def simulate_deficiency(rgb, deficiency_type):
     else:
         return rgb
 
-    simulated_lms = np.dot(M, lms)
+    simulated_lms = np.dot(lms, M.T)
     xyz_sim = LMS_to_XYZ(simulated_lms)
     rgb_sim = XYZ_to_sRGB(xyz_sim)
     return linear_to_gamma(rgb_sim)
