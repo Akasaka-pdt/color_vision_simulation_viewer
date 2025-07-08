@@ -66,19 +66,13 @@ def simulate_deficiency(rgb, deficiency_type):
 
 def convert_image(img, mode, multiple):
     img = img.resize((int(img.width * multiple) , int(img.height * multiple)), Image.LANCZOS)
-
     arr = np.array(img.convert("RGB"))
-    h, w, _ = arr.shape
-    new_arr = np.zeros_like(arr)
 
-    for y in range(h):
-        for x in range(w):
-            pixel = arr[y, x]
-            if mode == 'Acromat':
-                gray = int(np.mean(pixel))
-                new_arr[y, x] = [gray, gray, gray]
-            else:
-                new_arr[y, x] = simulate_deficiency(pixel, mode)
+    if mode == 'Acromat':
+        gray = np.mean(arr, axis=2, keepdims=True)
+        new_arr = np.repeat(gray, 3, axis=2).astype(np.uint8)
+    else:
+        new_arr = simulate_deficiency(arr, mode)
 
     return Image.fromarray(new_arr)
 
