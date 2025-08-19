@@ -310,25 +310,109 @@ if process_btn:
 else:
     # 静的な説明セクション（ユーザー入力を混ぜない）
     st.markdown(
-        """
-        <style>
-            .table { color:#000; background:#FBF4E5; text-align:center; border:2px #360000 solid;
-                     width:100%; margin:auto; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; border-collapse:collapse; }
-            td { border:1px #360000 solid; font-size:1.0rem; vertical-align:middle; line-height:2.0; }
-            .header_row { border-bottom:2px double #360000; }
-        </style>
-        <h3>型別の割合（参考）</h3>
-        <table class="table">
+        """<style>
+    .display_1 {
+        top: 0;
+        left: 0;
+    }
+
+    .table {
+        color: #000000;
+        background-color: #FBF4E5;
+        text-align: center;
+        border: 2px #360000 solid;
+        width: 100%;
+        height: 200px;
+        margin: auto;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        border-collapse: collapse;
+    }
+
+    td {
+        border: 1px #360000 solid;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        font-size: 1.25vw;
+        vertical-align: middle;
+        line-height: 2.0;
+    }
+
+    html,
+    body {
+        background-color: #f0f0f0;
+    }
+
+    .header_row {
+        border-bottom: 2px double #360000;
+    }
+
+    h2 {
+        margin-bottom: 5px;
+    }
+
+    .hosoku {
+        matgin: 1px;
+    }
+</style>
+<div class="table_wrap">
+    <h2>型別の割合</h2>
+    <div id="display-element" class="display_1">
+        <table border="1" class="table">
             <tbody>
-                <tr><td rowspan="2">型</td><td colspan="3">錐体細胞</td><td rowspan="2">割合(男性)</td></tr>
-                <tr class="header_row"><td>L</td><td>M</td><td>S</td></tr>
-                <tr><td>C型</td><td>○</td><td>○</td><td>○</td><td>約95%</td></tr>
-                <tr><td>P型</td><td>-</td><td>○</td><td>○</td><td>約1.5%</td></tr>
-                <tr><td>D型</td><td>○</td><td>-</td><td>○</td><td>約3.5%</td></tr>
-                <tr><td>T型</td><td>○</td><td>○</td><td>-</td><td>極少</td></tr>
-                <tr><td>A型</td><td>-</td><td>-</td><td>-</td><td>極少</td></tr>
+                <tr>
+                    <td rowspan="2">型</td>
+                    <td colspan="3">錐体細胞</td>
+                    <td rowspan="2">割合<br>(男性)</td>
+                </tr>
+                <tr class="header_row">
+                    <td class="red">L</td>
+                    <td class="magenta">M</td>
+                    <td class="cyan">S</td>
+                </tr>
+                <tr>
+                    <td>C型</td>
+                    <td>○</td>
+                    <td>○</td>
+                    <td>○</td>
+                    <td>約９５％</td>
+                </tr>
+                <tr>
+                    <td>P型</td>
+                    <td>-</td>
+                    <td>○</td>
+                    <td>○</td>
+                    <td>約１.５％</td>
+                </tr>
+                <tr>
+                    <td>D型</td>
+                    <td>○</td>
+                    <td>-</td>
+                    <td>○</td>
+                    <td>約３.５％</td>
+                </tr>
+                <tr>
+                    <td>T型</td>
+                    <td>○</td>
+                    <td>○</td>
+                    <td>-</td>
+                    <td>約０.００１％</td>
+                </tr>
+                <tr>
+                    <td>A型</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>約０.００１％</td>
+                </tr>
             </tbody>
         </table>
+        <div class="pyramidal_cells">
+            <p class="hosoku">※Ｌ（赤）錐体：主に黄緑～赤の光を感じる</p>
+            <p class="hosoku">※Ｍ（緑）錐体：主に緑～橙の光を感じる</p>
+            <p class="hosoku">※Ｓ（青）錐体：主に紫～青の光を感じる</p>
+        </div>
+    </div>
+</div>
         """,
         unsafe_allow_html=True
     )
+
