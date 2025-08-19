@@ -1,315 +1,334 @@
+# -*- coding: utf-8 -*-
 import streamlit as st
 import fitz  # PyMuPDF
 from PIL import Image
 import numpy as np
 import io
 import zipfile
+import os
+import re
+import gc
 
-# Color vision deficiency simulation functions
+# =========================
+# セキュリティ/堅牢化のポイント
+# - 入力検証：拡張子/PDF暗号化/ページ数/ピクセル数
+# - サニタイズ：Zip内のファイル名を安全化
+# - リソース解放：doc.close(), del, gc.collect()
+# - 例外：詳細を出さず要点のみ表示（情報漏えい抑止）
+# - 0倍レンダリング防止（最小スケールを適用）
+# - Zipは1本化して /common /protanopia 等に振り分け
+# =========================
+
+# ---- 安全側の上限/制限（必要に応じて調整）----
+MAX_FILES = 200               # 一度に処理するPDF数の上限
+MAX_PAGES_PER_FILE = 200      # 1ファイルの最大ページ数
+MAX_PIXELS_PER_PAGE = 1000_000_000  # 1ページの最大ピクセル数（約12MP）
+ALLOWED_EXT = {".pdf"}       # 受け付ける拡張子
+
+# ---- 表示スケールの下限/上限 ----
+MIN_SCALE = 0.1              # 0指定で0ピクセルになる事故を防止
+MAX_SCALE = 1.0              # 必要に応じて 1.5 などへ
+
+# ============ 色覚シミュレーション ============
 def gamma_to_linear(rgb):
-    rgb = np.array(rgb) / 255.0
-    linear = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
-    return linear
+    rgb = np.asarray(rgb, dtype=np.float32) / 255.0
+    return np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
 
 def linear_to_gamma(rgb):
-    gamma = np.where(rgb <= 0.0031308, 12.92 * rgb, 1.055 * (rgb ** (1 / 2.4)) - 0.055)
-    return np.clip(gamma * 255, 0, 255).astype(np.uint8)
+    gamma = np.where(rgb <= 0.0031308, 12.92 * rgb, 1.055 * (np.power(rgb, 1/2.4)) - 0.055)
+    return np.clip(gamma * 255.0, 0, 255).astype(np.uint8)
 
 def sRGB_to_XYZ(rgb):
     M = np.array([[0.4124, 0.3576, 0.1805],
                   [0.2126, 0.7152, 0.0722],
-                  [0.0193, 0.1192, 0.9505]])
+                  [0.0193, 0.1192, 0.9505]], dtype=np.float32)
     return np.dot(rgb, M.T)
 
 def XYZ_to_LMS(xyz):
     M = np.array([[0.4002, 0.7075, -0.0808],
                   [-0.2263, 1.1653, 0.0457],
-                  [0.0, 0.0, 0.9182]])
+                  [0.0,    0.0,     0.9182]], dtype=np.float32)
     return np.dot(xyz, M.T)
 
 def LMS_to_XYZ(lms):
-    M = np.array([[1.8599, -1.1294, 0.2199],
-                  [0.3612, 0.6388, 0.0],
-                  [0.0, 0.0, 1.0891]])
+    M = np.array([[ 1.8599, -1.1294, 0.2199],
+                  [ 0.3612,  0.6388, 0.0   ],
+                  [ 0.0,     0.0,    1.0891]], dtype=np.float32)
     return np.dot(lms, M.T)
 
 def XYZ_to_sRGB(xyz):
-    M = np.array([[3.2406, -1.5372, -0.4986],
-                  [-0.9689, 1.8758, 0.0415],
-                  [0.0557, -0.2040, 1.0570]])
+    M = np.array([[ 3.2406, -1.5372, -0.4986],
+                  [-0.9689,  1.8758,  0.0415],
+                  [ 0.0557, -0.2040,  1.0570]], dtype=np.float32)
     return np.dot(xyz, M.T)
 
-def simulate_deficiency(rgb, deficiency_type):
-    linear_rgb = gamma_to_linear(rgb)
+def simulate_deficiency(arr_rgb, deficiency_type):
+    linear_rgb = gamma_to_linear(arr_rgb)
     xyz = sRGB_to_XYZ(linear_rgb)
     lms = XYZ_to_LMS(xyz)
 
     if deficiency_type == 'protanopia':
         M = np.array([[0, 1.208, -0.208],
                       [0, 1, 0],
-                      [0, 0, 1]])
+                      [0, 0, 1]], dtype=np.float32)
     elif deficiency_type == 'deuteranopia':
         M = np.array([[1, 0, 0],
                       [0.8278, 0, 0.1722],
-                      [0, 0, 1]])
+                      [0, 0, 1]], dtype=np.float32)
     elif deficiency_type == 'tritanopia':
         M = np.array([[1, 0, 0],
                       [0, 1, 0],
-                      [-0.5254, 1.5254, 0]])
+                      [-0.5254, 1.5254, 0]], dtype=np.float32)
     else:
-        return rgb
+        return arr_rgb  # unknown -> no change
 
     simulated_lms = np.dot(lms, M.T)
     xyz_sim = LMS_to_XYZ(simulated_lms)
     rgb_sim = XYZ_to_sRGB(xyz_sim)
     return linear_to_gamma(rgb_sim)
 
-def convert_image(img, mode, multiple):
-    img = img.resize((int(img.width * multiple) , int(img.height * multiple)), Image.LANCZOS)
-    arr = np.array(img.convert("RGB"))
-
+def convert_image(img: Image.Image, mode: str):
+    arr = np.array(img.convert("RGB"), dtype=np.uint8)
     if mode == 'Acromat':
         gray = np.mean(arr, axis=2, keepdims=True)
         new_arr = np.repeat(gray, 3, axis=2).astype(np.uint8)
     else:
         new_arr = simulate_deficiency(arr, mode)
-
     return Image.fromarray(new_arr)
 
-def main():
-    # Streamlit UI
-    st.html("""
-            <style>
-                h1 {
-                    text-align: center;
-                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                    font-size: 1.8vw;
-                    color: #C00000;
-                }
-            </style>
-            <h1>Color Vision Simulation Viewer</h1>
-            """)
+# ============ ユーティリティ ============
+def sanitize_filename(name: str) -> str:
+    """Zip内のファイル名を安全化（パストラバーサル対策・制御文字除去）"""
+    base = os.path.basename(name or "file")
+    base = re.sub(r"[^A-Za-z0-9._-]+", "_", base)
+    if not base.lower().endswith(".pdf"):
+        base += ".pdf"
+    return base
 
-    uploaded_files = st.sidebar.file_uploader("Upload a PDF file", accept_multiple_files=True, type="pdf")
-    multiple = st.sidebar.slider("画質を調節してください。", 0.0, 1.0, 1.0)
-    st.sidebar.write(f"画質：{multiple}倍で処理")
-    
-    if st.sidebar.button("Process PDF Files", disabled=not uploaded_files):
-        if uploaded_files:
-            progress_text = "Operation in progress. Please wait..."
+def clamp_scale(x: float) -> float:
+    try:
+        x = float(x)
+    except Exception:
+        return 1.0
+    return max(MIN_SCALE, min(MAX_SCALE, x))
 
-            zip_buffer_common = io.BytesIO()
-            zip_buffer_protanopia = io.BytesIO()
-            zip_buffer_deuteranopia = io.BytesIO()
-            zip_buffer_tritanopia = io.BytesIO()
-            zip_buffer_acromat = io.BytesIO()
+# ============ Streamlit UI ============
+st.set_page_config(page_title="Color Vision Simulation Viewer", layout="wide")
+st.markdown(
+    """
+    <style>
+      h1 { text-align:center; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color:#C00000; }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+st.markdown("<h1>Color Vision Simulation Viewer</h1>", unsafe_allow_html=True)
 
-            zip_file_common = zipfile.ZipFile(zip_buffer_common, "w", zipfile.ZIP_DEFLATED)
-            zip_file_protanopia = zipfile.ZipFile(zip_buffer_protanopia, "w", zipfile.ZIP_DEFLATED)
-            zip_file_deuteranopia = zipfile.ZipFile(zip_buffer_deuteranopia, "w", zipfile.ZIP_DEFLATED)
-            zip_file_tritanopia = zipfile.ZipFile(zip_buffer_tritanopia, "w", zipfile.ZIP_DEFLATED)
-            zip_file_acromat = zipfile.ZipFile(zip_buffer_acromat, "w", zipfile.ZIP_DEFLATED)
+uploaded_files = st.sidebar.file_uploader("Upload PDF files", accept_multiple_files=True, type=["pdf"])
+scale_in = st.sidebar.slider("画質スケール（0.1〜1.0）", MIN_SCALE, MAX_SCALE, 1.0)
+scale = clamp_scale(scale_in)
+st.sidebar.write(f"画質：{scale:.2f} 倍で処理")
 
-            num = 0
-            my_bar = st.progress(0, text=progress_text)
-            st.html("<br><br><br>")  # Add some space before the tabs
-            tab1, tab2, tab3, tab4, tab5 = st.tabs(["Common(正常)", "Protanopia(赤機能不全)", "Deuteranopia(緑機能不全)", "Tritanopia(青機能不全)", "Achromat(全色盲)"])
-            par_num = 100 / len(uploaded_files)
+process_btn = st.sidebar.button("Process PDF Files", disabled=not uploaded_files)
 
-            for uploaded_file in uploaded_files:
-                doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
-                page_count = doc.page_count
-                filename = uploaded_file.name
-                par_page = (par_num / (page_count * 5)) / 100
+# タブ（閲覧プレビュー用）
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "Common(正常)", "Protanopia(赤機能不全)", "Deuteranopia(緑機能不全)",
+    "Tritanopia(青機能不全)", "Achromat(全色盲)"
+])
 
+def render_page_to_image(page, scale: float) -> Image.Image:
+    """PyMuPDFでページを画像化（解像度制御）"""
+    mat = fitz.Matrix(scale, scale)
+    pix = page.get_pixmap(matrix=mat, alpha=False)  # 透過なし（容量軽減）
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    return img
+
+if process_btn:
+    if not uploaded_files:
+        st.error("Please upload at least one PDF file.")
+        st.stop()
+
+    if len(uploaded_files) > MAX_FILES:
+        st.warning(f"❗ 一度に処理できるPDFは最大 {MAX_FILES} 件です。")
+        uploaded_files = uploaded_files[:MAX_FILES]
+
+    # 出力Zip（1本）
+    out_zip_buf = io.BytesIO()
+    with zipfile.ZipFile(out_zip_buf, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as outzip:
+        # 進捗管理
+        total_steps = 0
+        # 事前に総ページ数（制限後）をカウント
+        for uf in uploaded_files:
+            try:
+                doc = fitz.open(stream=uf.read(), filetype="pdf")
+                uf.seek(0)
+                if doc.needs_password():
+                    doc.close()
+                    continue
+                total_steps += min(doc.page_count, MAX_PAGES_PER_FILE) * 5  # 5種のモード
+                doc.close()
+            except Exception:
+                # 読み込み失敗 → スキップ
+                continue
+        if total_steps == 0:
+            st.warning("処理可能なPDFがありません（暗号化/破損/0ページ等）。")
+            st.stop()
+
+        step = 0
+        progress = st.progress(0.0, text="Processing... Please wait")
+        st.markdown("<br><br>", unsafe_allow_html=True)
+
+        for uploaded_file in uploaded_files:
+            # 拡張子検証
+            ext = os.path.splitext(uploaded_file.name or "")[1].lower()
+            if ext not in ALLOWED_EXT:
+                st.warning(f"❗ 未対応の拡張子です: {uploaded_file.name}")
+                continue
+
+            safe_pdf_name = sanitize_filename(uploaded_file.name)
+
+            # PDFを開く（暗号化や破損の扱い）
+            try:
+                data = uploaded_file.read()
+                uploaded_file.seek(0)
+                doc = fitz.open(stream=data, filetype="pdf")
+            except Exception:
+                st.warning(f"❗ PDFを開けませんでした（破損の可能性）: {uploaded_file.name}")
+                continue
+
+            try:
+                if doc.needs_password():
+                    st.info(f"🔒 暗号化PDFのためスキップ: {uploaded_file.name}")
+                    doc.close()
+                    continue
+
+                page_count = min(doc.page_count, MAX_PAGES_PER_FILE)
+                per_file_note = ""
+                if doc.page_count > MAX_PAGES_PER_FILE:
+                    per_file_note = f"（先頭 {MAX_PAGES_PER_FILE} ページのみ処理）"
+
+                with tab1:
+                    st.subheader(f"{safe_pdf_name} {per_file_note}")
+
+                # 各ページ処理
                 for page_num in range(page_count):
-                    page = doc.load_page(page_num)
-                    pix = page.get_pixmap(matrix=fitz.Matrix(1, 1))
-                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    try:
+                        page = doc.load_page(page_num)
+                        # 粗大なDoSを防ぐため、ピクセル総数をチェック
+                        # （scale適用後の概算、PDFのメディアボックスから計算）
+                        rect = page.rect
+                        est_w = max(1, int(rect.width * scale))
+                        est_h = max(1, int(rect.height * scale))
+                        if est_w * est_h > MAX_PIXELS_PER_PAGE:
+                            # 大きすぎるページはスケールを落としてレンダリング
+                            adj_scale = scale * (MAX_PIXELS_PER_PAGE / (est_w * est_h)) ** 0.5
+                            adj_scale = max(MIN_SCALE, min(adj_scale, scale))
+                        else:
+                            adj_scale = scale
 
-                    with tab1:
-                        st.subheader(f"{filename} - Page {page_num + 1} (Normal Vision)")
-                        st.image(img, caption="Original", use_container_width=True)
-                    img_bytes = io.BytesIO()
-                    img.save(img_bytes, format="PNG")
-                    zip_file_common.writestr(f"{filename}_{page_num + 1}_common.png", img_bytes.getvalue())
-                    num += par_page
-                    my_bar.progress(num, text=progress_text)
+                        img = render_page_to_image(page, adj_scale)
 
-                    with tab2:
-                        st.subheader(f"{filename} - Page {page_num + 1} (Protanopia)")
-                        converted = convert_image(img, 'protanopia', multiple)
-                        st.image(converted, caption="Protanopia", use_container_width=True)
-                    img_bytes = io.BytesIO()
-                    converted.save(img_bytes, format="PNG")
-                    zip_file_protanopia.writestr(f"{filename}_{page_num + 1}_protanopia.png", img_bytes.getvalue())
-                    num += par_page
-                    my_bar.progress(num, text=progress_text)
+                        # プレビュー表示（Normal）
+                        with tab1:
+                            st.subheader(f"{safe_pdf_name} - Page {page_num + 1} (Normal)")
+                            st.image(img, caption="Original", use_container_width=True)
 
-                    with tab3:
-                        st.subheader(f"{filename} - Page {page_num + 1} (Deuteranopia)")
-                        converted = convert_image(img, 'deuteranopia', multiple)
-                        st.image(converted, caption="Deuteranopia", use_container_width=True)
-                    img_bytes = io.BytesIO()
-                    converted.save(img_bytes, format="PNG")
-                    zip_file_deuteranopia.writestr(f"{filename}_{page_num + 1}_deuteranopia.png", img_bytes.getvalue()) 
-                    num += par_page
-                    my_bar.progress(num, text=progress_text)
+                        # Zip書き込み（各モード）
+                        # 共通：/common 等のディレクトリ配下に格納
+                        buf = io.BytesIO()
+                        img.save(buf, format="PNG")
+                        outzip.writestr(f"common/{safe_pdf_name}_p{page_num+1}.png", buf.getvalue())
+                        step += 1; progress.progress(step / total_steps, text="Processing... Please wait")
 
-                    with tab4:
-                        st.subheader(f"{filename} - Page {page_num + 1} (Tritanopia)")
-                        converted = convert_image(img, 'tritanopia', multiple)    
-                        st.image(converted, caption="Tritanopia", use_container_width=True)
-                    img_bytes = io.BytesIO()
-                    converted.save(img_bytes, format="PNG")
-                    zip_file_tritanopia.writestr(f"{filename}_{page_num + 1}_tritanopia.png", img_bytes.getvalue())
-                    num += par_page
-                    my_bar.progress(num, text=progress_text)
+                        # Protanopia
+                        with tab2:
+                            st.subheader(f"{safe_pdf_name} - Page {page_num + 1} (Protanopia)")
+                            converted = convert_image(img, 'protanopia')
+                            st.image(converted, caption="Protanopia", use_container_width=True)
+                        buf = io.BytesIO(); converted.save(buf, format="PNG")
+                        outzip.writestr(f"protanopia/{safe_pdf_name}_p{page_num+1}.png", buf.getvalue())
+                        step += 1; progress.progress(step / total_steps, text="Processing... Please wait")
 
-                    with tab5:
-                        st.subheader(f"{filename} - Page {page_num + 1} (Achromatopsia)")
-                        converted = convert_image(img, 'Acromat', multiple)
-                        st.image(converted, caption="Achromatopsia", use_container_width=True)
-                    img_bytes = io.BytesIO()
-                    converted.save(img_bytes, format="PNG")
-                    zip_file_acromat.writestr(f"{filename}_{page_num + 1}_acromat.png", img_bytes.getvalue())
-                    num += par_page
-                    my_bar.progress(num, text=progress_text)
-                
-            zip_file_common.close()
-            zip_file_protanopia.close()
-            zip_file_deuteranopia.close()
-            zip_file_tritanopia.close()
-            zip_file_acromat.close()
-            my_bar.empty()
-            st.balloons()
-            st.toast("All images processed successfully!")
-            
-            zip_file_common_bytes = zip_buffer_common.getvalue()
-            zip_file_protanopia_bytes = zip_buffer_protanopia.getvalue()
-            zip_file_deuteranopia_bytes = zip_buffer_deuteranopia.getvalue()
-            zip_file_tritanopia_bytes = zip_buffer_tritanopia.getvalue()
-            zip_file_acromat_bytes = zip_buffer_acromat.getvalue()
+                        # Deuteranopia
+                        with tab3:
+                            st.subheader(f"{safe_pdf_name} - Page {page_num + 1} (Deuteranopia)")
+                            converted = convert_image(img, 'deuteranopia')
+                            st.image(converted, caption="Deuteranopia", use_container_width=True)
+                        buf = io.BytesIO(); converted.save(buf, format="PNG")
+                        outzip.writestr(f"deuteranopia/{safe_pdf_name}_p{page_num+1}.png", buf.getvalue())
+                        step += 1; progress.progress(step / total_steps, text="Processing... Please wait")
 
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                zip_file.writestr("images_common_view.zip", zip_file_common_bytes)
-                zip_file.writestr("images_protanopia_view.zip", zip_file_protanopia_bytes)
-                zip_file.writestr("images_deuteranopia_view.zip", zip_file_deuteranopia_bytes)
-                zip_file.writestr("images_tritanopia_view.zip", zip_file_tritanopia_bytes)
-                zip_file.writestr("images_acromat_view.zip", zip_file_acromat_bytes)
+                        # Tritanopia
+                        with tab4:
+                            st.subheader(f"{safe_pdf_name} - Page {page_num + 1} (Tritanopia)")
+                            converted = convert_image(img, 'tritanopia')
+                            st.image(converted, caption="Tritanopia", use_container_width=True)
+                        buf = io.BytesIO(); converted.save(buf, format="PNG")
+                        outzip.writestr(f"tritanopia/{safe_pdf_name}_p{page_num+1}.png", buf.getvalue())
+                        step += 1; progress.progress(step / total_steps, text="Processing... Please wait")
 
-            zip_buffer.seek(0)
-            st.download_button("Download all processed images as ZIP", data=zip_buffer.getvalue(), file_name="processed_images.zip", mime="application/zip")
-        else:
-            st.error("Please upload at least one PDF file to process.")
-    else:
-        st.html("""
-            <style>
-                .display_1 {
-                    top: 0;
-                    left: 0;
-                }
+                        # Achromat
+                        with tab5:
+                            st.subheader(f"{safe_pdf_name} - Page {page_num + 1} (Achromatopsia)")
+                            converted = convert_image(img, 'Acromat')
+                            st.image(converted, caption="Achromatopsia", use_container_width=True)
+                        buf = io.BytesIO(); converted.save(buf, format="PNG")
+                        outzip.writestr(f"achromat/{safe_pdf_name}_p{page_num+1}.png", buf.getvalue())
+                        step += 1; progress.progress(step / total_steps, text="Processing... Please wait")
 
-                .table {
-                    color: #000000;
-                    background-color: #FBF4E5;
-                    text-align: center;
-                    border: 2px #360000 solid;
-                    width: 100%;
-                    height: 200px;
-                    margin: auto; 
-                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                    border-collapse: collapse;
-                }
+                        # メモリ解放
+                        del img, converted, buf
+                        gc.collect()
 
-                td{
-                    border: 1px #360000 solid;
-                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                    font-size: 1.25vw;
-                    vertical-align: middle;
-                    line-height: 2.0;
-                }
+                    except Exception:
+                        st.warning(f"❗ ページ {page_num+1} の処理に失敗しました（{safe_pdf_name}）。")
+                        continue
 
-                html, body{
-                    background-color: #f0f0f0;
-                }
+            except Exception:
+                st.warning(f"❗ 処理中に問題が発生しました: {uploaded_file.name}")
+            finally:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
 
-                .header_row {
-                    border-bottom: 2px double #360000;
-                }
+        progress.empty()
+        st.balloons()
+        st.toast("All images processed successfully!")
 
-                h2{
-                    margin-bottom: 5px;
-                }
-
-                .hosoku{
-                    matgin: 1px;
-                }
-
-            </style>
-            <div class= "table_wrap">
-                <h2>型別の割合</h2>
-                <div id= "display-element" class="display_1">
-                    <table border= "1" class= "table">
-                        <tbody>
-                            <tr>
-                                <td rowspan= "2">型</td>
-                                <td colspan= "3">錐体細胞</td>
-                                <td rowspan= "2">割合<br>(男性)</td>
-                            </tr>
-                            <tr class="header_row">
-                                <td class="red">L</td>
-                                <td class="magenta">M</td>
-                                <td class="cyan">S</td>
-                            </tr>
-                            <tr>
-                                <td>C型</td>
-                                <td>○</td>
-                                <td>○</td>
-                                <td>○</td>
-                                <td>約９５％</td>
-                            </tr>
-                            <tr>
-                                <td>P型</td>
-                                <td>-</td>
-                                <td>○</td>
-                                <td>○</td>
-                                <td>約１.５％</td>
-                            </tr>
-                            <tr>
-                                <td>D型</td>
-                                <td>○</td>
-                                <td>-</td>
-                                <td>○</td>
-                                <td>約３.５％</td>
-                            </tr>
-                            <tr>
-                                <td>T型</td>
-                                <td>○</td>
-                                <td>○</td>
-                                <td>-</td>
-                                <td>約０.００１％</td>
-                            </tr>
-                            <tr>
-                                <td>A型</td>
-                                <td>-</td>
-                                <td>-</td>
-                                <td>-</td>
-                                <td>約０.００１％</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                    <div class="pyramidal_cells">
-                        <p class="hosoku">※Ｌ（赤）錐体：主に黄緑～赤の光を感じる</p>
-                        <p class="hosoku">※Ｍ（緑）錐体：主に緑～橙の光を感じる</p>
-                        <p class="hosoku">※Ｓ（青）錐体：主に紫～青の光を感じる</p>
-                    </div>
-                </div>
-            </div>
-
-                """)
-        
-
-if __name__ == "__main__":
-    main()
+    # Zipダウンロード
+    out_zip_buf.seek(0)
+    st.download_button(
+        "Download all processed images as ZIP",
+        data=out_zip_buf.getvalue(),
+        file_name="processed_images.zip",
+        mime="application/zip"
+    )
+    del out_zip_buf
+    gc.collect()
+else:
+    # 静的な説明セクション（ユーザー入力を混ぜない）
+    st.markdown(
+        """
+        <style>
+            .table { color:#000; background:#FBF4E5; text-align:center; border:2px #360000 solid;
+                     width:100%; margin:auto; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; border-collapse:collapse; }
+            td { border:1px #360000 solid; font-size:1.0rem; vertical-align:middle; line-height:2.0; }
+            .header_row { border-bottom:2px double #360000; }
+        </style>
+        <h3>型別の割合（参考）</h3>
+        <table class="table">
+            <tbody>
+                <tr><td rowspan="2">型</td><td colspan="3">錐体細胞</td><td rowspan="2">割合(男性)</td></tr>
+                <tr class="header_row"><td>L</td><td>M</td><td>S</td></tr>
+                <tr><td>C型</td><td>○</td><td>○</td><td>○</td><td>約95%</td></tr>
+                <tr><td>P型</td><td>-</td><td>○</td><td>○</td><td>約1.5%</td></tr>
+                <tr><td>D型</td><td>○</td><td>-</td><td>○</td><td>約3.5%</td></tr>
+                <tr><td>T型</td><td>○</td><td>○</td><td>-</td><td>極少</td></tr>
+                <tr><td>A型</td><td>-</td><td>-</td><td>-</td><td>極少</td></tr>
+            </tbody>
+        </table>
+        """,
+        unsafe_allow_html=True
+    )
